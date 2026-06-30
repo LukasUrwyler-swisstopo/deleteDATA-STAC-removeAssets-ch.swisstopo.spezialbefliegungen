@@ -9,7 +9,11 @@ import requests
 from urllib.parse import urljoin
 from typing import Dict, List, Optional, Tuple
 
-PROXY_AVAILABLE = False
+# Firmenproxy für externe Verbindungen (data.geo.admin.ch / sys-data.int.bgdi.ch)
+_PROXY = {
+    "http":  "http://proxy-bvcol.admin.ch:8080",
+    "https": "http://proxy-bvcol.admin.ch:8080",
+}
 
 COLLECTION_ID = "ch.swisstopo.spezialbefliegungen"
 
@@ -36,20 +40,13 @@ EXT_PRESETS: List[Tuple[str, List[str]]] = [
 # ─── Interne Session-Funktionen ───────────────────────────────────────────────
 
 def _session_get(url: str, auth: Tuple, params: dict = None) -> requests.Response:
-    if PROXY_AVAILABLE:
-        return _get_session().get(url, auth=auth, params=params, timeout=(30, 60))
-    return requests.get(url, auth=auth, params=params, timeout=(30, 60))
+    return requests.get(url, auth=auth, params=params,
+                        proxies=_PROXY, verify=False, timeout=(30, 60))
 
 
 def _session_delete(url: str, auth: Tuple) -> requests.Response:
-    if PROXY_AVAILABLE:
-        return _get_session().delete(url, auth=auth, timeout=(30, 60))
-    return requests.delete(url, auth=auth, timeout=(30, 60))
-
-
-def _get_session() -> requests.Session:
-    """Placeholder für Proxy-Session (nur relevant wenn PROXY_AVAILABLE=True)."""
-    return requests.Session()
+    return requests.delete(url, auth=auth,
+                           proxies=_PROXY, verify=False, timeout=(30, 60))
 
 
 # ─── Öffentliche API-Funktionen ───────────────────────────────────────────────
@@ -113,9 +110,11 @@ def check_asset_status(href: str, auth: Tuple) -> int:
     if not href:
         return -1
     try:
-        r = requests.head(href, timeout=(5, 15), allow_redirects=True)
+        r = requests.head(href, proxies=_PROXY, verify=False,
+                          timeout=(5, 15), allow_redirects=True)
         if r.status_code in (401, 403):
-            r = requests.head(href, auth=auth, timeout=(5, 15), allow_redirects=True)
+            r = requests.head(href, auth=auth, proxies=_PROXY, verify=False,
+                              timeout=(5, 15), allow_redirects=True)
         return r.status_code
     except requests.exceptions.Timeout:
         return -2

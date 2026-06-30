@@ -1428,6 +1428,10 @@ class KryDeleteApp(tk.Tk):
             imports = gdwh_get_imports(self._gdwh_base_url, gds_key)
             self._gdwh_imports = imports
             self._gdwh_log_write(f"[GDWH] {len(imports)} DataPackage(s) gefunden.\n")
+            # Debug: Rohstruktur des ersten Pakets anzeigen
+            if imports:
+                raw = json.dumps(imports[0], indent=2, ensure_ascii=False)
+                self._gdwh_log_write(f"[DEBUG] Struktur erstes DataPackage:\n{raw}\n\n")
             self.after(0, lambda: self._gdwh_populate_list(imports))
         except Exception as exc:
             self._gdwh_log_write(f"[FEHLER] {exc}\n")

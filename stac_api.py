@@ -128,10 +128,22 @@ def check_asset_status(href: str, auth: Tuple) -> int:
         return -3
 
 
+def stac_item_acq_date(item: Dict) -> str:
+    """Gibt das Aufnahmedatum aus der Item-ID zurück (Format: YYYY-MM-DD).
+    Priorität: Item-ID (enthält immer das Befliegungsdatum), dann properties.datetime."""
+    m = re.search(r"(20\d{2}-\d{2}-\d{2})", item.get("id", ""))
+    if m:
+        return m.group(1)
+    return item.get("properties", {}).get("datetime", "")
+
+
 def stac_item_year(item: Dict) -> str:
-    """Extrahiert das Jahr aus properties.datetime oder der Item-ID."""
-    src = item.get("properties", {}).get("datetime", "") or item.get("id", "")
-    m = re.search(r"\b(20\d{2})\b", src)
+    """Extrahiert das Aufnahmejahr aus der Item-ID (Befliegungsdatum, nicht Importdatum)."""
+    m = re.search(r"\b(20\d{2})\b", item.get("id", ""))
+    if m:
+        return m.group(1)
+    # Fallback: properties.datetime (kann Importdatum sein – nur wenn ID kein Jahr hat)
+    m = re.search(r"\b(20\d{2})\b", item.get("properties", {}).get("datetime", ""))
     return m.group(1) if m else ""
 
 

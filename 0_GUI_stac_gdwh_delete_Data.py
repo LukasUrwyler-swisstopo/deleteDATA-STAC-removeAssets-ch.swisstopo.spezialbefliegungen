@@ -32,7 +32,7 @@ from stac_api import (
     COLLECTION_ID, ENVIRONMENTS, AUFTRAGSTYPEN, EXT_PRESETS,
     get_item_direct, get_collection_items, filter_items,
     delete_asset, delete_item, check_asset_status,
-    stac_item_year, stac_item_area,
+    stac_item_year, stac_item_area, stac_item_acq_date,
 )
 from gdwh_api import (
     GDWH_ENVIRONMENTS, GDWH_GDS_KEYS,
@@ -321,6 +321,27 @@ class KryDeleteApp(tk.Tk):
             logger.addHandler(fh)
         return logger
 
+    def _make_session_logger(self, mode: str, env: str,
+                              year: str, area: str, stac_dt: str) -> logging.Logger:
+        """Erstellt pro Lösch-Vorgang einen Logger mit beschreibendem Dateinamen.
+        Format: LOG_STAC_INT_2024_ALETSCH_2024-08-20.log"""
+        def _s(s: str) -> str:
+            return re.sub(r"[^\w\-]", "_", s).strip("_") or ""
+        dt_short = stac_dt[:10] if stac_dt else ""
+        parts    = [p for p in ["LOG", mode, env, year, _s(area), _s(dt_short)] if p]
+        log_name = "_".join(parts)
+        log_dir  = Path(__file__).parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / f"{log_name}.log"
+        logger   = logging.getLogger(f"session_{log_name}")
+        logger.setLevel(logging.DEBUG)
+        if not logger.handlers:
+            fh = logging.FileHandler(log_file, encoding="utf-8")
+            fh.setFormatter(logging.Formatter(
+                "%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+            logger.addHandler(fh)
+        return logger
+
     # ── UI aufbauen ───────────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -436,46 +457,57 @@ class KryDeleteApp(tk.Tk):
             ttk.Radiobutton(typ_frame, text=typ, variable=self._auftragstyp_var, value=typ,
                             command=self._on_auftragstyp_change).pack(side="left", padx=(0, 14))
 
-        ttk.Label(sec, text="Item-ID:").grid(row=1, column=0, sticky="w",
+        ttk.Label(sec, text="Jahr:").grid(row=1, column=0, sticky="w",
+                                          padx=(0, 8), pady=(6, 0))
+        self._year_filter_var = tk.StringVar()
+        self._year_filter_var.trace_add("write", lambda *_: self._apply_filters())
+        ttk.Entry(sec, textvariable=self._year_filter_var, width=8).grid(
+            row=1, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(
+            sec, text="z.B. 2023  —  Leer = alle Jahre",
+            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
+        ).grid(row=1, column=2, columnspan=2, sticky="w", pady=(6, 0))
+
+        ttk.Label(sec, text="Item-ID:").grid(row=2, column=0, sticky="w",
                                               padx=(0, 8), pady=(6, 0))
         self._item_id_var = tk.StringVar(value=list(AUFTRAGSTYPEN.values())[0])
         ttk.Entry(sec, textvariable=self._item_id_var, width=46).grid(
-            row=1, column=1, sticky="ew", padx=(0, 10), pady=(6, 0))
+            row=2, column=1, sticky="ew", padx=(0, 10), pady=(6, 0))
 
         self._fetch_direct_btn = ttk.Button(
             sec, text="Exakt abrufen (1 Item)",
             command=self._fetch_direct, state="disabled",
         )
-        self._fetch_direct_btn.grid(row=1, column=2, padx=(0, 4), pady=(6, 0))
+        self._fetch_direct_btn.grid(row=2, column=2, padx=(0, 4), pady=(6, 0))
 
         self._fetch_all_btn = ttk.Button(
             sec, text="Alle suchen + filtern",
             command=self._fetch_all, state="disabled",
         )
-        self._fetch_all_btn.grid(row=1, column=3, pady=(6, 0))
+        self._fetch_all_btn.grid(row=2, column=3, pady=(6, 0))
 
         ttk.Label(
             sec,
             text='„Exakt" = vollständige Item-ID nötig  ·  '
                  '„Alle suchen" = Teilstring genügt, z.B. "2024-08-20" (langsam)',
             font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
-        ).grid(row=2, column=1, columnspan=3, sticky="w", pady=(2, 0))
+        ).grid(row=3, column=1, columnspan=3, sticky="w", pady=(2, 0))
 
-        ttk.Label(sec, text="Asset-Key:").grid(row=3, column=0, sticky="w",
+        ttk.Label(sec, text="Asset-Key:").grid(row=4, column=0, sticky="w",
                                                 padx=(0, 8), pady=(6, 0))
         self._asset_filter_var = tk.StringVar()
         self._asset_filter_var.trace_add("write", lambda *_: self._apply_filters())
         ttk.Entry(sec, textvariable=self._asset_filter_var, width=30).grid(
-            row=3, column=1, sticky="w", padx=(0, 10), pady=(6, 0))
+            row=4, column=1, sticky="w", padx=(0, 10), pady=(6, 0))
         ttk.Label(
             sec, text='Teilstring, z.B. "nrgb" oder "16bit"  —  Leer = alle Assets',
             font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
-        ).grid(row=3, column=2, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=4, column=2, columnspan=2, sticky="w", pady=(6, 0))
 
-        ttk.Label(sec, text="Dateiendung:").grid(row=4, column=0, sticky="w",
+        ttk.Label(sec, text="Dateiendung:").grid(row=5, column=0, sticky="w",
                                                   padx=(0, 8), pady=(6, 0))
         ext_frame = ttk.Frame(sec)
-        ext_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=(6, 0))
+        ext_frame.grid(row=5, column=1, columnspan=3, sticky="w", pady=(6, 0))
 
         self._ext_vars: List[Tuple[tk.BooleanVar, List[str]]] = []
         for label, exts in EXT_PRESETS:
@@ -650,19 +682,30 @@ class KryDeleteApp(tk.Tk):
         sec.pack(fill="x", pady=(0, 6))
         sec.columnconfigure(1, weight=1)
 
-        ttk.Label(sec, text="GDS-Key:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(sec, text="Jahr:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self._gdwh_year_filter_var = tk.StringVar()
+        self._gdwh_year_filter_var.trace_add("write", lambda *_: self._gdwh_apply_filter())
+        ttk.Entry(sec, textvariable=self._gdwh_year_filter_var, width=8).grid(
+            row=0, column=1, sticky="w")
+        ttk.Label(
+            sec, text="z.B. 2023  —  Leer = alle Jahre",
+            font=("Segoe UI", 8, "italic"), style="Dim.TLabel",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+
+        ttk.Label(sec, text="GDS-Key:").grid(row=1, column=0, sticky="w",
+                                              padx=(0, 8), pady=(6, 0))
         self._gdwh_gds_key_var = tk.StringVar(value=GDWH_GDS_KEYS[0])
         self._gdwh_gds_combo = ttk.Combobox(
             sec, textvariable=self._gdwh_gds_key_var,
             values=GDWH_GDS_KEYS, state="readonly", width=28,
         )
-        self._gdwh_gds_combo.grid(row=0, column=1, sticky="w", padx=(0, 10))
+        self._gdwh_gds_combo.grid(row=1, column=1, sticky="w", padx=(0, 10), pady=(6, 0))
 
         self._gdwh_fetch_btn = ttk.Button(
             sec, text="Imports laden",
             command=self._gdwh_fetch_imports, state="normal",
         )
-        self._gdwh_fetch_btn.grid(row=0, column=2)
+        self._gdwh_fetch_btn.grid(row=1, column=2, pady=(6, 0))
 
     def _build_gdwh_step3(self, parent):
         sec = ttk.LabelFrame(parent, text="3   DataPackages auswählen zum Löschen",
@@ -1082,8 +1125,9 @@ class KryDeleteApp(tk.Tk):
     def _apply_filters(self):
         if not self._items_asset_hrefs:
             return
-        key_filter = self._asset_filter_var.get().strip().lower()
-        extensions = self._get_active_extensions()
+        year_filter = self._year_filter_var.get().strip()
+        key_filter  = self._asset_filter_var.get().strip().lower()
+        extensions  = self._get_active_extensions()
         assets_map: Dict[str, List[str]] = {}
         for iid, key_href in self._items_asset_hrefs.items():
             keys = []
@@ -1097,7 +1141,10 @@ class KryDeleteApp(tk.Tk):
                 keys.append(k)
             assets_map[iid] = keys
         self._items_assets = assets_map
-        self._populate_checkboxes(self._items_preview, assets_map)
+        items = self._items_preview
+        if year_filter:
+            items = [it for it in items if stac_item_year(it) == year_filter]
+        self._populate_checkboxes(items, assets_map)
 
     # ── STAC Checkbox-Bereich ─────────────────────────────────────────────────
 
@@ -1113,12 +1160,9 @@ class KryDeleteApp(tk.Tk):
         T = DARK if self._dark else LIGHT
         any_visible = False
 
-        # Nur Items mit Assets, sortiert nach datetime (neueste zuerst)
+        # Nur Items mit Assets, sortiert nach Aufnahmedatum aus Item-ID (neueste zuerst)
         visible = [it for it in items if assets_map.get(it["id"])]
-        visible.sort(
-            key=lambda it: it.get("properties", {}).get("datetime", it.get("id", "")),
-            reverse=True,
-        )
+        visible.sort(key=stac_item_acq_date, reverse=True)
 
         for item in visible:
             iid        = item["id"]
@@ -1347,11 +1391,31 @@ class KryDeleteApp(tk.Tk):
         ts             = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         env            = self._env_var.get()
 
+        # Metadaten aus ausgewählten Items für Log-Dateiname und Protokoll
+        sel_objs = [it for it in self._items_preview if it["id"] in selected_items]
+        _yrs = list(dict.fromkeys(stac_item_year(it)     for it in sel_objs if stac_item_year(it)))
+        _ars = list(dict.fromkeys(stac_item_area(it)     for it in sel_objs if stac_item_area(it)))
+        _dts = list(dict.fromkeys(stac_item_acq_date(it) for it in sel_objs if stac_item_acq_date(it)))
+        meta_year    = _yrs[0] if len(_yrs) == 1 else ("multi" if _yrs else "unbekannt")
+        meta_area    = _ars[0] if len(_ars) == 1 else ("multi" if _ars else "unbekannt")
+        meta_stac_dt = _dts[0] if len(_dts) == 1 else (f"multi_{len(sel_objs)}" if _dts else "")
+        auftragstyp  = self._auftragstyp_var.get().split("(")[0].strip()
+
+        session_logger = self._make_session_logger("STAC", env, meta_year, meta_area, meta_stac_dt)
+
         self._log_write(f"\n{'='*60}\n[{ts}] STAC LÖSCHUNG GESTARTET\n{'='*60}\n")
-        self._log_write(f"Umgebung:   {env}\nCollection: {COLLECTION_ID}\n"
-                        f"Items: {len(selected_items)}  |  Assets: {total}\n\n")
-        self._file_logger.info(
-            f"[STAC START] {env} | {COLLECTION_ID} | "
+        self._log_write(
+            f"Umgebung:        {env}\n"
+            f"Collection:      {COLLECTION_ID}\n"
+            f"Auftragstyp:     {auftragstyp}\n"
+            f"Jahr:            {meta_year}\n"
+            f"AREA:            {meta_area}\n"
+            f"STAC-Datetime:   {meta_stac_dt or '(unbekannt)'}\n"
+            f"Items:           {len(selected_items)}  |  Assets: {total}\n\n"
+        )
+        session_logger.info(
+            f"[STAC START] {env} | {COLLECTION_ID} | Auftragstyp: {auftragstyp} | "
+            f"Jahr: {meta_year} | AREA: {meta_area} | StacDatetime: {meta_stac_dt} | "
             f"Items: {len(selected_items)} | Assets: {total}")
 
         for iid, asset_keys in selected_items.items():
@@ -1367,17 +1431,17 @@ class KryDeleteApp(tk.Tk):
                 except Exception as exc:
                     success = False
                     self._log_write(f"  [FEHLER] {ak}: {exc}\n")
-                    self._file_logger.error(f"[STAC FEHLER] {env}/{iid}/{ak}: {exc}")
+                    session_logger.error(f"[STAC FEHLER] {env}/{iid}/{ak}: {exc}")
 
                 if success:
                     ok_for_item += 1
                     ok_list.append(f"{iid}/{ak}")
                     self._log_write(f"  [OK]   gelöscht: {ak}  (HTTP {http_code})\n")
-                    self._file_logger.info(f"[STAC OK]   {env}/{iid}/{ak}  HTTP {http_code}")
+                    session_logger.info(f"[STAC OK]   {env}/{iid}/{ak}  HTTP {http_code}")
                 else:
                     fail_list.append(f"{iid}/{ak}")
                     self._log_write(f"  [FAIL] nicht gelöscht: {ak}  (HTTP {http_code})\n")
-                    self._file_logger.warning(
+                    session_logger.warning(
                         f"[STAC FAIL] {env}/{iid}/{ak}  HTTP {http_code}")
 
                 done += 1
@@ -1392,17 +1456,17 @@ class KryDeleteApp(tk.Tk):
                 except Exception as exc:
                     item_ok = False
                     self._log_write(f"  [FEHLER] Item {iid}: {exc}\n")
-                    self._file_logger.error(f"[STAC FEHLER] Item {env}/{iid}: {exc}")
+                    session_logger.error(f"[STAC FEHLER] Item {env}/{iid}: {exc}")
 
                 if item_ok:
                     items_deleted.append(iid)
                     self._log_write(f"  [OK]   Item gelöscht: {iid}  (HTTP {item_code})\n")
-                    self._file_logger.info(f"[STAC OK]   Item {env}/{iid}  HTTP {item_code}")
+                    session_logger.info(f"[STAC OK]   Item {env}/{iid}  HTTP {item_code}")
                 else:
                     items_del_fail.append(iid)
                     self._log_write(
                         f"  [FAIL] Item nicht gelöscht: {iid}  (HTTP {item_code})\n")
-                    self._file_logger.warning(
+                    session_logger.warning(
                         f"[STAC FAIL] Item {env}/{iid}  HTTP {item_code}")
 
         ts2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1413,7 +1477,7 @@ class KryDeleteApp(tk.Tk):
             self._log_write(f"  Items gelöscht:        {len(items_deleted)}\n"
                             f"  Items fehlgeschlagen:  {len(items_del_fail)}\n")
         self._log_write(f"{'='*60}\n")
-        self._file_logger.info(
+        session_logger.info(
             f"[STAC END] Assets OK: {len(ok_list)} | FAIL: {len(fail_list)} | "
             f"Items gelöscht: {len(items_deleted)} | FAIL: {len(items_del_fail)}")
 
@@ -1481,13 +1545,32 @@ class KryDeleteApp(tk.Tk):
                         f"  → {gdwh_import_date(imp)}  ↔  {match['folder']}"
                         + (f"  [{match['area']}]" if match['area'] else "") + "\n")
 
-            self.after(0, lambda e=enriched: self._gdwh_populate_list(e))
+            self._gdwh_enriched = enriched
+            self.after(0, self._gdwh_apply_filter)
         except Exception as exc:
             self._gdwh_log_write(f"[FEHLER] {exc}\n")
             self.after(0, lambda: messagebox.showerror("GDWH Fehler", str(exc)))
             self.after(0, lambda: self._gdwh_fetch_btn.config(state="normal"))
             self.after(0, lambda: self._gdwh_preview_lbl.configure(
                 text="Fehler beim Laden."))
+
+    def _gdwh_apply_filter(self):
+        if not hasattr(self, "_gdwh_enriched"):
+            return
+        year = self._gdwh_year_filter_var.get().strip()
+        data = self._gdwh_enriched
+        if year:
+            def _year_matches(item):
+                imp, match = item
+                if match:
+                    for src in (match.get("stac_datetime", ""), match.get("year", "")):
+                        m = re.search(r"\b(20\d{2})\b", src)
+                        if m and m.group(1) == year:
+                            return True
+                m = re.search(r"\b(20\d{2})\b", gdwh_import_date(imp))
+                return bool(m and m.group(1) == year)
+            data = [item for item in data if _year_matches(item)]
+        self._gdwh_populate_list(data)
 
     def _gdwh_clear_list(self):
         for w in self._gdwh_list_frame.winfo_children():
@@ -1694,15 +1777,56 @@ class KryDeleteApp(tk.Tk):
         ts        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         env       = self._gdwh_env_var.get()
 
+        # Metadaten aus ausgewählten Packages für Log-Dateiname und Protokoll
+        enriched_map = {gdwh_import_id(imp): (imp, match)
+                        for imp, match in getattr(self, "_gdwh_enriched", [])}
+        sel_enriched = [enriched_map[pid] for pid in pkg_ids if pid in enriched_map]
+
+        _yrs, _ars, _dts, _typs = [], [], [], []
+        for imp, match in sel_enriched:
+            year_found = False
+            if match:
+                for src in (match.get("stac_datetime", ""), match.get("year", "")):
+                    m = re.search(r"\b(20\d{2})\b", src)
+                    if m:
+                        y = m.group(1)
+                        if y not in _yrs:
+                            _yrs.append(y)
+                        year_found = True
+                        break
+                if match.get("area") and match["area"] not in _ars:
+                    _ars.append(match["area"])
+                if match.get("stac_datetime") and match["stac_datetime"] not in _dts:
+                    _dts.append(match["stac_datetime"])
+                if match.get("auftragstyp") and match["auftragstyp"] not in _typs:
+                    _typs.append(match["auftragstyp"])
+            if not year_found:
+                m = re.search(r"\b(20\d{2})\b", gdwh_import_date(imp))
+                if m and m.group(1) not in _yrs:
+                    _yrs.append(m.group(1))
+
+        meta_year        = _yrs[0] if len(_yrs) == 1 else ("multi" if _yrs else "unbekannt")
+        meta_area        = _ars[0] if len(_ars) == 1 else ("multi" if _ars else "unbekannt")
+        meta_stac_dt     = _dts[0] if len(_dts) == 1 else (f"multi_{len(pkg_ids)}" if _dts else "")
+        meta_auftragstyp = _typs[0] if _typs else ""
+
+        session_logger = self._make_session_logger("GDWH", env, meta_year, meta_area, meta_stac_dt)
+
         self._gdwh_log_write(
             f"\n{'='*60}\n[{ts}] GDWH LÖSCHUNG GESTARTET\n{'='*60}\n"
-            f"Umgebung:   {env}\n"
-            f"GDS-Key:    {gds_key}\n"
-            f"Packages:   {len(pkg_ids)}\n"
-            f"E-Mail:     {email or '(keine)'}\n\n"
+            f"Umgebung:        {env}\n"
+            f"GDS-Key:         {gds_key}\n"
+            f"Auftragstyp:     {meta_auftragstyp or '(unbekannt)'}\n"
+            f"Jahr:            {meta_year}\n"
+            f"AREA:            {meta_area}\n"
+            f"STAC-Datetime:   {meta_stac_dt or '(unbekannt)'}\n"
+            f"Packages:        {len(pkg_ids)}\n"
+            f"E-Mail:          {email or '(keine)'}\n\n"
         )
-        self._file_logger.info(
-            f"[GDWH START] {env} | {gds_key} | Packages: {len(pkg_ids)}")
+        session_logger.info(
+            f"[GDWH START] {env} | {gds_key} | Auftragstyp: {meta_auftragstyp} | "
+            f"Jahr: {meta_year} | AREA: {meta_area} | StacDatetime: {meta_stac_dt} | "
+            f"Packages: {len(pkg_ids)}")
 
         for i, pkg_id in enumerate(pkg_ids, 1):
             try:
@@ -1714,12 +1838,12 @@ class KryDeleteApp(tk.Tk):
                 self._gdwh_log_write(
                     f"  [OK]  Package gelöscht: {pkg_id}\n"
                     f"        Job-ID: {job_id}  |  Status: {job_status}\n")
-                self._file_logger.info(
+                session_logger.info(
                     f"[GDWH OK] {env}/{gds_key}/{pkg_id}  Job: {job_id}")
                 ok_list.append(pkg_id)
             except Exception as exc:
                 self._gdwh_log_write(f"  [FAIL] Package: {pkg_id}  →  {exc}\n")
-                self._file_logger.warning(
+                session_logger.warning(
                     f"[GDWH FAIL] {env}/{gds_key}/{pkg_id}  →  {exc}")
                 fail_list.append(pkg_id)
 
@@ -1732,7 +1856,7 @@ class KryDeleteApp(tk.Tk):
             f"  Fehlgeschlagen: {len(fail_list)}\n"
             f"{'='*60}\n"
         )
-        self._file_logger.info(
+        session_logger.info(
             f"[GDWH END] OK: {len(ok_list)} | FAIL: {len(fail_list)}")
 
         note = ""

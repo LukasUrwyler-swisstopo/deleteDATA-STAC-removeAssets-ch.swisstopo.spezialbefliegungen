@@ -5,9 +5,15 @@ Importiert von 0_GUI_stac_gdwh_delete_Data.py.
 Direkt nutzbar: python stac_api.py  (gibt Kurzinfo aus)
 """
 
+import re
 import requests
 from urllib.parse import urljoin
 from typing import Dict, List, Optional, Tuple
+
+try:
+    from gdwh_api import _AOI_CENTROIDS as _STAC_AOI_CENTROIDS
+except ImportError:
+    _STAC_AOI_CENTROIDS = {}
 
 # Firmenproxy für externe Verbindungen (data.geo.admin.ch / sys-data.int.bgdi.ch)
 _PROXY = {
@@ -120,6 +126,37 @@ def check_asset_status(href: str, auth: Tuple) -> int:
         return -2
     except Exception:
         return -3
+
+
+def stac_item_year(item: Dict) -> str:
+    """Extrahiert das Jahr aus properties.datetime oder der Item-ID."""
+    src = item.get("properties", {}).get("datetime", "") or item.get("id", "")
+    m = re.search(r"\b(20\d{2})\b", src)
+    return m.group(1) if m else ""
+
+
+def stac_item_area(item: Dict) -> str:
+    """Schätzt den AOI-Namen aus Properties oder Geometrie-Schwerpunkt.
+    Sucht zuerst in properties, dann via WGS84-Schwerpunkt → nächste LV95-AOI."""
+    props = item.get("properties", {})
+    for key in ("area", "aoi", "area_name", "region"):
+        val = str(props.get(key, "")).strip()
+        if val:
+            return val.upper()
+    bbox = item.get("bbox")
+    if bbox and len(bbox) >= 4 and _STAC_AOI_CENTROIDS:
+        lon_c = (bbox[0] + bbox[2]) / 2
+        lat_c = (bbox[1] + bbox[3]) / 2
+        # Näherung WGS84 → LV95 (ausreichend für AOI-Suche)
+        e_lv95 = 2_600_000 + (lon_c - 7.44) * 74_000
+        n_lv95 = 1_200_000 + (lat_c - 46.95) * 111_000
+        best, best_d = "", float("inf")
+        for name, (ax, ay) in _STAC_AOI_CENTROIDS.items():
+            d = (e_lv95 - ax) ** 2 + (n_lv95 - ay) ** 2
+            if d < best_d:
+                best_d, best = d, name
+        return best
+    return ""
 
 
 if __name__ == "__main__":

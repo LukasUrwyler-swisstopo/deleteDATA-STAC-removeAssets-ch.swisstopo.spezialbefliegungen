@@ -16,6 +16,7 @@ Datum: 2025-12
 Lizenz: MIT
 """
 
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import ctypes
@@ -31,11 +32,12 @@ from stac_api import (
     COLLECTION_ID, ENVIRONMENTS, AUFTRAGSTYPEN, EXT_PRESETS,
     get_item_direct, get_collection_items, filter_items,
     delete_asset, delete_item, check_asset_status,
+    stac_item_year, stac_item_area,
 )
 from gdwh_api import (
     GDWH_ENVIRONMENTS, GDWH_GDS_KEYS,
     gdwh_get_imports, gdwh_delete_import,
-    gdwh_import_id, gdwh_import_date, gdwh_import_status,
+    gdwh_import_id, gdwh_import_date,
     gdwh_import_footprint_bbox, gdwh_estimate_area,
     gdwh_scan_bucket, gdwh_match_folder, gdwh_bucket_path,
 )
@@ -1111,24 +1113,53 @@ class KryDeleteApp(tk.Tk):
         T = DARK if self._dark else LIGHT
         any_visible = False
 
-        for item in items:
+        # Nur Items mit Assets, sortiert nach datetime (neueste zuerst)
+        visible = [it for it in items if assets_map.get(it["id"])]
+        visible.sort(
+            key=lambda it: it.get("properties", {}).get("datetime", it.get("id", "")),
+            reverse=True,
+        )
+
+        for item in visible:
             iid        = item["id"]
             asset_keys = assets_map.get(iid, [])
-            if not asset_keys:
-                continue
             any_visible = True
             self._asset_selection[iid]     = {}
             self._asset_status_labels[iid] = {}
 
-            hdr = tk.Label(
-                self._chk_frame, text=f"▸  {iid}",
-                font=("Segoe UI", 9, "bold"),
-                bg=T["chk_bg"], fg=T["chk_item"], anchor="w", padx=6,
-            )
-            hdr._is_item_header = True
-            hdr.pack(fill="x", pady=(8, 2))
-            tk.Frame(self._chk_frame, bg=T["sep"], height=1).pack(fill="x", padx=6)
+            year = stac_item_year(item)
+            area = stac_item_area(item)
 
+            # ── Zeile 1: Jahr  AREA ───────────────────────────────────────────
+            hdr1 = tk.Frame(self._chk_frame, bg=T["chk_bg"])
+            hdr1.pack(fill="x", padx=6, pady=(10, 0))
+
+            tk.Label(
+                hdr1, text=year if year else "????",
+                font=("Cascadia Mono", 9, "bold"),
+                bg=T["chk_bg"], fg=T["fg"], anchor="w", width=5,
+            ).pack(side="left")
+            tk.Label(
+                hdr1, text=area if area else "–",
+                font=("Cascadia Mono", 9, "bold"),
+                bg=T["chk_bg"], fg=T["accent"] if area else T["fg_dim"], anchor="w",
+            ).pack(side="left")
+
+            tk.Frame(self._chk_frame, bg=T["sep"], height=1).pack(
+                fill="x", padx=6, pady=(2, 0))
+
+            # ── Zeile 2 (eingerückt): Item-ID (Collection-Präfix ausblenden) ──
+            _pfx = COLLECTION_ID + "_"
+            iid_display = iid[len(_pfx):] if iid.startswith(_pfx) else iid
+            hdr2 = tk.Label(
+                self._chk_frame, text=f"  ▸  {iid_display}",
+                font=("Segoe UI", 8, "bold"),
+                bg=T["chk_bg"], fg=T["chk_item"], anchor="w", padx=10,
+            )
+            hdr2._is_item_header = True
+            hdr2.pack(fill="x", pady=(2, 2))
+
+            # ── Zeile 3+: Assets als Checkboxen ──────────────────────────────
             for ak in asset_keys:
                 href   = self._items_asset_hrefs.get(iid, {}).get(ak, "")
                 suffix = Path(href).suffix if href else ""
@@ -1137,7 +1168,7 @@ class KryDeleteApp(tk.Tk):
                 self._asset_selection[iid][ak] = var
 
                 row = tk.Frame(self._chk_frame, bg=T["chk_bg"])
-                row.pack(fill="x", padx=6, pady=1)
+                row.pack(fill="x", padx=24, pady=1)
                 tk.Checkbutton(
                     row, variable=var,
                     bg=T["chk_bg"], fg=T["fg"], selectcolor=T["input"],
@@ -1425,6 +1456,7 @@ class KryDeleteApp(tk.Tk):
                          args=(gds_key,), daemon=True).start()
 
     def _gdwh_fetch_worker(self, gds_key: str):
+        self._gdwh_current_gds_key = gds_key
         try:
             self._gdwh_log_write(f"[GDWH] Lade Imports für GDS-Key: {gds_key} …\n")
             imports = gdwh_get_imports(self._gdwh_base_url, gds_key)
@@ -1435,7 +1467,7 @@ class KryDeleteApp(tk.Tk):
             env = self._gdwh_env_var.get()
             bucket = gdwh_bucket_path(env, gds_key)
             self._gdwh_log_write(f"[GDWH] Scanne Bucket: {bucket} …\n")
-            bucket_entries = gdwh_scan_bucket(env, gds_key)
+            bucket_entries = gdwh_scan_bucket(env, gds_key, log_fn=self._gdwh_log_write)
             self._gdwh_log_write(
                 f"[GDWH] {len(bucket_entries)} Ordner im Bucket gefunden.\n")
 
@@ -1477,103 +1509,117 @@ class KryDeleteApp(tk.Tk):
             self._gdwh_preview_lbl.configure(text="0 DataPackages gefunden.")
             return
 
-        for imp, match in enriched:
+        def _year_key(item):
+            """Sortierschlüssel: Jahr aus stac_datetime > Ordnername > importDate."""
+            imp, match = item
+            if match:
+                for src in (match.get("stac_datetime", ""), match.get("year", "")):
+                    m = re.search(r"\b(20\d{2})\b", src)
+                    if m:
+                        return int(m.group(1))
+            m = re.search(r"\b(20\d{2})\b", gdwh_import_date(imp))
+            return int(m.group(1)) if m else 0
+
+        for imp, match in sorted(enriched, key=_year_key, reverse=True):
             pkg_id   = gdwh_import_id(imp)
             pkg_date = gdwh_import_date(imp)
-            pkg_stat = gdwh_import_status(imp)
             pkg_bbox = gdwh_import_footprint_bbox(imp)
+
+            auftragstyp   = match.get("auftragstyp", "")  if match else ""
+            area          = match.get("area", "")          if match else ""
+            stac_datetime = match.get("stac_datetime", "") if match else ""
+            commentary    = match.get("commentary", "")    if match else ""
+
+            # Jahr für Anzeige: stac_datetime > Ordnername > importDate
+            year = ""
+            if match:
+                for src in (stac_datetime, match.get("year", "")):
+                    m = re.search(r"\b(20\d{2})\b", src)
+                    if m:
+                        year = m.group(1)
+                        break
+            if not year:
+                m = re.search(r"\b(20\d{2})\b", pkg_date)
+                year = m.group(1) if m else ""
+
+            # AREA: aus Bucket oder geschätzt aus Footprint
+            if not area:
+                area = gdwh_estimate_area(imp)
+                area_color = T["hint"]
+                area_suffix = " (geschätzt)" if area else ""
+            else:
+                area_color = T["accent"]
+                area_suffix = ""
 
             var = tk.BooleanVar(value=False)
             var.trace_add("write", lambda *_: self._gdwh_on_checkbox_change())
             self._gdwh_selection[pkg_id] = var
 
-            # ── Hauptzeile ────────────────────────────────────────────────────
-            row = tk.Frame(self._gdwh_list_frame, bg=T["chk_bg"])
-            row.pack(fill="x", padx=6, pady=(3, 0))
+            # ── Zeile 1: Jahr  AREA  GDS-Key ─────────────────────────────────
+            row1 = tk.Frame(self._gdwh_list_frame, bg=T["chk_bg"])
+            row1.pack(fill="x", padx=6, pady=(5, 0))
 
             tk.Checkbutton(
-                row, variable=var,
+                row1, variable=var,
                 bg=T["chk_bg"], fg=T["fg"], selectcolor=T["input"],
                 activebackground=T["chk_bg"], activeforeground=T["fg"],
             ).pack(side="left")
 
-            # ── Felder aus Bucket-Match ───────────────────────────────────────
-            auftragstyp   = match.get("auftragstyp", "")   if match else ""
-            area          = match.get("area", "")           if match else ""
-            stac_datetime = match.get("stac_datetime", "")  if match else ""
-            commentary    = match.get("commentary", "")     if match else ""
-            year          = match.get("year", "")           if match else ""
-            folder        = match.get("folder", "")         if match else ""
+            tk.Label(
+                row1, text=year if year else "????",
+                font=("Cascadia Mono", 9, "bold"),
+                bg=T["chk_bg"], fg=T["fg"], anchor="w", width=5,
+            ).pack(side="left")
 
-            has_match = bool(match and (area or auftragstyp or folder))
+            tk.Label(
+                row1, text=(area + area_suffix) if area else pkg_id[:12] + "…",
+                font=("Cascadia Mono", 9, "bold"),
+                bg=T["chk_bg"], fg=area_color if area else T["fg_dim"], anchor="w",
+            ).pack(side="left")
 
-            # ── Zeile 1: Auftragstyp  |  AREA  |  Jahr  |  Paketname  ────────
-            if auftragstyp:
+            gds_key = getattr(self, "_gdwh_current_gds_key", "")
+            if gds_key:
                 tk.Label(
-                    row, text=auftragstyp,
-                    font=("Cascadia Mono", 9, "bold"),
-                    bg=T["chk_bg"], fg=T["ok"], anchor="w",
-                ).pack(side="left")
-
-            if area:
-                lbl = tk.Label(
-                    row, text=f"    {area}" if auftragstyp else area,
-                    font=("Cascadia Mono", 9, "bold"),
-                    bg=T["chk_bg"], fg=T["accent"], anchor="w",
-                )
-                lbl._is_pkg_header = True
-                lbl.pack(side="left")
-            elif not has_match:
-                # Kein Match: geschätzte AREA aus Koordinaten
-                estimated = gdwh_estimate_area(imp)
-                lbl = tk.Label(
-                    row, text=estimated if estimated else pkg_id[:8] + "…",
-                    font=("Cascadia Mono", 9, "bold"),
-                    bg=T["chk_bg"], fg=T["hint"], anchor="w",
-                )
-                lbl._is_pkg_header = True
-                lbl.pack(side="left")
-
-            if year:
-                tk.Label(
-                    row, text=f"    {year}",
-                    font=("Cascadia Mono", 9),
+                    row1, text=f"    [{gds_key}]",
+                    font=("Cascadia Mono", 8),
                     bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
                 ).pack(side="left")
 
-            if folder:
+            # ── Zeile 2 (eingerückt): Auftragstyp  StacItemIdDatetime ─────────
+            row2 = tk.Frame(self._gdwh_list_frame, bg=T["chk_bg"])
+            row2.pack(fill="x", padx=30, pady=0)
+
+            if auftragstyp:
                 tk.Label(
-                    row, text=f"    {folder}",
-                    font=("Cascadia Mono", 9),
-                    bg=T["chk_bg"], fg=T["fg"], anchor="w",
+                    row2, text=auftragstyp,
+                    font=("Cascadia Mono", 8, "bold"),
+                    bg=T["chk_bg"], fg=T["ok"], anchor="w",
                 ).pack(side="left")
 
-            if pkg_stat:
-                sc = "ok" if pkg_stat.lower() in (
-                    "completed", "done", "success", "finished") else "hint"
-                tk.Label(
-                    row, text=f"    [{pkg_stat}]",
-                    font=("Cascadia Mono", 9),
-                    bg=T["chk_bg"], fg=T[sc], anchor="w",
-                ).pack(side="left")
-
-            # ── Zeile 2: StacItemIdDatetime  |  Commentary  |  Import-Datum  ─
-            detail_row = tk.Frame(self._gdwh_list_frame, bg=T["chk_bg"])
-            detail_row.pack(fill="x", padx=28, pady=(0, 3))
-
-            detail_parts = []
             if stac_datetime:
-                detail_parts.append(stac_datetime)
+                tk.Label(
+                    row2, text=("    " if auftragstyp else "") + stac_datetime,
+                    font=("Segoe UI", 8),
+                    bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
+                ).pack(side="left")
+            elif not auftragstyp and pkg_bbox:
+                tk.Label(
+                    row2, text=pkg_bbox,
+                    font=("Segoe UI", 8),
+                    bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
+                ).pack(side="left")
+
+            # ── Zeile 3 (eingerückt): Commentary  Import-Datum ──────────────
+            row3 = tk.Frame(self._gdwh_list_frame, bg=T["chk_bg"])
+            row3.pack(fill="x", padx=30, pady=(0, 2))
+
+            parts3 = []
             if commentary:
-                detail_parts.append(commentary)
-            if not has_match:
-                if pkg_bbox:
-                    detail_parts.append(pkg_bbox)
-            detail_parts.append(pkg_date)
+                parts3.append(commentary)
+            parts3.append(pkg_date)
 
             tk.Label(
-                detail_row,
-                text="  " + "   ·   ".join(detail_parts),
+                row3, text="   ·   ".join(parts3),
                 font=("Segoe UI", 8),
                 bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
             ).pack(side="left")

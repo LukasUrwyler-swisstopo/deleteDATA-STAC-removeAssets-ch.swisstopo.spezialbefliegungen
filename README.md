@@ -117,16 +117,24 @@ Filteränderungen wirken **sofort** auf die geladenen Daten — kein Neu-Abruf n
 
 ### Schritt 3 — Assets auswählen
 
-Nach dem Laden erscheinen alle gefilterten Assets als Checkboxen:
+Nach dem Laden erscheinen alle gefilterten Items hierarchisch, **sortiert nach Aufnahmedatum (neueste zuerst)**:
 
 ```
-▸  kry-2024-08-20t10270000
+2024   OBERAAR
 ─────────────────────────────────────────────────────────
-☐  kry-2024-08-20t10270000-nrgb-16bit    .tif
-☐  kry-2024-08-20t10270000-thumbnail     .jpg
+  ▸  kry_2024-08-20t10270000
+        ☐  nrgb-16bit    .tif
+        ☐  thumbnail     .jpg
+
+2023   GORNER
+─────────────────────────────────────────────────────────
+  ▸  kry_2023-08-15t09850000
+        ☐  nrgb-16bit    .tif
 ```
 
-**Standardmässig sind alle Assets abgewählt** — die Auswahl muss bewusst getroffen werden.
+- **Jahr + AREA** werden aus den STAC-Metadaten (`properties.datetime`, `bbox`) abgeleitet
+- Der Collection-Präfix `ch.swisstopo.spezialbefliegungen_` wird im Item-Namen ausgeblendet
+- **Standardmässig sind alle Assets abgewählt** — die Auswahl muss bewusst getroffen werden.
 
 #### Auswahlsteuerung
 

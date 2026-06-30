@@ -19,6 +19,7 @@ from stac_api import (
     get_item_direct, get_collection_items,
     delete_asset, delete_item,
     check_asset_status,
+    stac_item_year, stac_item_area,
 )
 from gdwh_api import (
     GDWH_ENVIRONMENTS,
@@ -26,7 +27,7 @@ from gdwh_api import (
     gdwh_import_id, gdwh_import_name, gdwh_import_date, gdwh_import_status,
     gdwh_import_footprint_bbox, gdwh_estimate_area,
     gdwh_bucket_path,
-    _lv95, _extract_year_from_folder, _parse_iso_dt,
+    _lv95, _extract_year_from_folder, _area_from_folder_name, _parse_iso_dt,
 )
 
 AUTH      = ("testuser", "testpass")
@@ -538,6 +539,27 @@ class TestExtractYearFromFolder:
         assert _extract_year_from_folder("OBERAAR_2023_DSM") == ""
 
 
+class TestAreaFromFolderName:
+
+    def test_raster_dsm(self):
+        assert _area_from_folder_name("2023_OBERAAR_DSM") == "OBERAAR"
+
+    def test_raster_dop(self):
+        assert _area_from_folder_name("2025_GUPPENFIRN_DOP") == "GUPPENFIRN"
+
+    def test_vector_punktwolke(self):
+        assert _area_from_folder_name("2023_OBERAAR_DSM_PointCloud") == "OBERAAR"
+
+    def test_mehrteiliger_aoi(self):
+        assert _area_from_folder_name("2024_MONT_ETOILE_DSM") == "MONT_ETOILE"
+
+    def test_ohne_jahr(self):
+        assert _area_from_folder_name("BIRCH_DSM") == "BIRCH"
+
+    def test_gorner(self):
+        assert _area_from_folder_name("2025_BIRCH_DSM") == "BIRCH"
+
+
 class TestParseIsoDt:
 
     def test_mit_millisekunden(self):
@@ -679,3 +701,68 @@ class TestGdwhDeleteImport:
                    return_value=_mock_response(401, raise_on_status=True)):
             with pytest.raises(req_module.HTTPError):
                 gdwh_delete_import(GDWH_BASE, self.GDS_KEY, self.PKG_ID)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# stac_item_year
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestStacItemYear:
+
+    def test_aus_properties_datetime(self):
+        item = {"id": "x", "properties": {"datetime": "2024-08-20T10:27:00Z"}}
+        assert stac_item_year(item) == "2024"
+
+    def test_aus_item_id_fallback(self):
+        item = {"id": "ch.swisstopo.spezialbefliegungen_kry_2023-08-15t09850000",
+                "properties": {}}
+        assert stac_item_year(item) == "2023"
+
+    def test_properties_hat_prioritaet_vor_id(self):
+        item = {"id": "kry_2020-01-01",
+                "properties": {"datetime": "2024-08-20T00:00:00Z"}}
+        assert stac_item_year(item) == "2024"
+
+    def test_kein_datum_gibt_leerstring(self):
+        assert stac_item_year({"id": "kein-datum", "properties": {}}) == ""
+
+    def test_leeres_item(self):
+        assert stac_item_year({}) == ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# stac_item_area
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestStacItemArea:
+
+    def test_aus_properties_area(self):
+        item = {"properties": {"area": "oberaar"}, "bbox": []}
+        assert stac_item_area(item) == "OBERAAR"
+
+    def test_aus_properties_aoi(self):
+        item = {"properties": {"aoi": "gorner"}, "bbox": []}
+        assert stac_item_area(item) == "GORNER"
+
+    def test_properties_hat_prioritaet_vor_bbox(self):
+        item = {
+            "properties": {"area": "RHONE"},
+            "bbox": [7.5, 45.8, 7.9, 46.2],
+        }
+        assert stac_item_area(item) == "RHONE"
+
+    def test_bbox_nahe_oberaar(self):
+        """WGS84-Schwerpunkt ~8.21°E / 46.59°N → nächste AOI: OBERAAR."""
+        item = {"properties": {}, "bbox": [8.0, 46.4, 8.4, 46.8]}
+        assert stac_item_area(item) == "OBERAAR"
+
+    def test_bbox_nahe_gorner(self):
+        """WGS84-Schwerpunkt ~7.72°E / 46.0°N → nächste AOI: GORNER."""
+        item = {"properties": {}, "bbox": [7.5, 45.8, 7.9, 46.2]}
+        assert stac_item_area(item) == "GORNER"
+
+    def test_kein_bbox_kein_property_gibt_leerstring(self):
+        assert stac_item_area({"properties": {}}) == ""
+
+    def test_leeres_item(self):
+        assert stac_item_area({}) == ""

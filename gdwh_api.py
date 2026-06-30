@@ -168,14 +168,14 @@ _GDS_BUCKET_TYPE = {
     "SB_DSM_PUNKTWOLKE":  "VECTOR",
 }
 
-# XML-Feldnamen für Metadaten-Extraktion
-_XML_AREA_TAGS        = ("AREA",)
-_XML_ITEMNAME_TAGS    = ("stacitemname", "stac_item_name", "stacItemName", "ItemName")
-_XML_LINEID_TAGS      = ("Line_ID", "LineID", "line_id")
-_XML_COMMENTARY_TAGS  = ("Commentary", "Kommentar", "Comment", "Description")
-_XML_AUFTRAGSTYP_TAGS = ("Auftragstyp", "AuftragsTyp", "auftragstyp", "OrderType", "Type")
-_XML_DATETIME_TAGS    = ("StacItemIdDatetime", "StacItemIdDateTime",
-                         "stac_item_id_datetime", "StacDateTime", "AcquisitionDate")
+# XML-Feldnamen für Metadaten-Extraktion (Vergleich erfolgt lowercase)
+_XML_AREA_TAGS        = ("area",)
+_XML_ITEMNAME_TAGS    = ("stacitemname", "stac_item_name", "stacitemname", "itemname")
+_XML_LINEID_TAGS      = ("line_id", "lineid")
+_XML_COMMENTARY_TAGS  = ("commentary", "kommentar", "comment", "description")
+_XML_AUFTRAGSTYP_TAGS = ("auftragstyp", "auftragstype", "ordertype", "type")
+_XML_DATETIME_TAGS    = ("stacitemiddatetime", "stac_item_id_datetime",
+                         "stacdatetime", "acquisitiondate", "datetime")
 
 
 def gdwh_bucket_path(env: str, gds_key: str) -> str:
@@ -198,10 +198,12 @@ def _parse_iso_dt(s: str) -> Optional[datetime]:
 
 
 def _find_xml_value(root: ET.Element, tags) -> str:
-    """Sucht rekursiv nach dem ersten vorhandenen Tag und gibt dessen Text zurück."""
-    for tag in tags:
-        el = root.find(".//" + tag)
-        if el is not None and el.text and el.text.strip():
+    """Sucht namespace-agnostisch nach dem ersten passenden Tag (alle Ebenen)."""
+    tag_set = set(t.lower() for t in tags)
+    for el in root.iter():
+        # Namespace-Präfix entfernen: '{http://...}Tag' → 'tag'
+        local = re.sub(r"^\{[^}]+\}", "", el.tag).lower()
+        if local in tag_set and el.text and el.text.strip():
             return el.text.strip()
     return ""
 
@@ -217,26 +219,49 @@ def _extract_year_from_folder(folder_name: str) -> str:
     return m.group(1) if m else ""
 
 
-def _read_folder_xml(folder_path: str) -> Dict:
-    """Liest die erste XML-Datei im Ordner (max. 1 Ebene tief) und extrahiert Metadaten."""
+def _area_from_folder_name(folder_name: str) -> str:
+    """Leitet AREA aus Ordnernamen ab, z.B. '2023_OBERAAR_DSM' → 'OBERAAR'.
+    Entfernt Jahr-Präfix und bekannte Typ-Suffixe (DSM, DOP, PointCloud usw.)."""
+    _TYPE_PARTS = {"DSM", "DOP", "DOP16", "DOP_16", "POINTCLOUD", "PUNKTWOLKE"}
+    name = re.sub(r"^\d{4}[_\-]", "", folder_name)
+    parts = re.split(r"[_\-]", name)
+    area_parts = []
+    for p in parts:
+        if p.upper() in _TYPE_PARTS:
+            break
+        area_parts.append(p)
+    return "_".join(area_parts)
+
+
+def _collect_xml_files(folder_path: str, max_depth: int = 2) -> List[str]:
+    """Sammelt alle XML-Dateien bis max_depth Ebenen tief."""
+    found = []
+
+    def _scan(path, depth):
+        if depth < 0:
+            return
+        try:
+            for entry in os.scandir(path):
+                if entry.is_file() and entry.name.lower().endswith(".xml"):
+                    found.append(entry.path)
+                elif entry.is_dir():
+                    _scan(entry.path, depth - 1)
+        except OSError:
+            pass
+
+    _scan(folder_path, max_depth)
+    return found
+
+
+def _read_folder_xml(folder_path: str, log_fn=None) -> Dict:
+    """Liest XML-Dateien im Ordner (bis 2 Ebenen tief) und extrahiert Metadaten."""
     result = {
         "area": "", "stacitemname": "", "line_id": "", "commentary": "",
         "auftragstyp": "", "stac_datetime": "",
     }
-    candidates = []
-    try:
-        for entry in os.scandir(folder_path):
-            if entry.is_file() and entry.name.lower().endswith(".xml"):
-                candidates.append(entry.path)
-            elif entry.is_dir():
-                try:
-                    for sub in os.scandir(entry.path):
-                        if sub.is_file() and sub.name.lower().endswith(".xml"):
-                            candidates.append(sub.path)
-                except OSError:
-                    pass
-    except OSError:
-        return result
+    candidates = _collect_xml_files(folder_path, max_depth=2)
+    if log_fn and candidates:
+        log_fn(f"      XML-Dateien: {[os.path.basename(p) for p in candidates]}\n")
     for xml_path in candidates:
         try:
             root = ET.parse(xml_path).getroot()
@@ -246,14 +271,19 @@ def _read_folder_xml(folder_path: str) -> Dict:
             result["commentary"]    = _find_xml_value(root, _XML_COMMENTARY_TAGS)
             result["auftragstyp"]   = _find_xml_value(root, _XML_AUFTRAGSTYP_TAGS)
             result["stac_datetime"] = _find_xml_value(root, _XML_DATETIME_TAGS)
+            if log_fn:
+                log_fn(f"      → area={result['area']!r}  auftragstyp={result['auftragstyp']!r}"
+                       f"  stac_datetime={result['stac_datetime']!r}\n")
             if any(result.values()):
                 break
-        except Exception:
+        except Exception as e:
+            if log_fn:
+                log_fn(f"      XML-Fehler {os.path.basename(xml_path)}: {e}\n")
             continue
     return result
 
 
-def gdwh_scan_bucket(env: str, gds_key: str) -> List[Dict]:
+def gdwh_scan_bucket(env: str, gds_key: str, log_fn=None) -> List[Dict]:
     """
     Scannt den GDWH-Bucket-Ordner und liefert für jeden Datenpaket-Unterordner
     die XML-Metadaten und den Änderungszeitpunkt zurück.
@@ -264,6 +294,8 @@ def gdwh_scan_bucket(env: str, gds_key: str) -> List[Dict]:
     root_path = gdwh_bucket_path(env, gds_key)
     entries = []
     if not os.path.exists(root_path):
+        if log_fn:
+            log_fn(f"  [Bucket] Pfad nicht erreichbar: {root_path}\n")
         return entries
     try:
         for entry in os.scandir(root_path):
@@ -275,15 +307,22 @@ def gdwh_scan_bucket(env: str, gds_key: str) -> List[Dict]:
                     entry.stat().st_mtime, tz=timezone.utc)
             except OSError:
                 pass
-            meta = _read_folder_xml(entry.path)
-            # Jahr: zuerst aus Ordnername, Fallback aus StacItemIdDatetime
+            if log_fn:
+                log_fn(f"  [Bucket] {entry.name}\n")
+            meta = _read_folder_xml(entry.path, log_fn=log_fn)
+
+            # Jahr: zuerst aus Ordnername, Fallback aus stac_datetime
             year = _extract_year_from_folder(entry.name)
             if not year and meta["stac_datetime"]:
                 m = re.search(r"(\d{4})", meta["stac_datetime"])
                 year = m.group(1) if m else ""
+
+            # AREA: aus XML, Fallback aus Ordnername
+            area = meta["area"] or _area_from_folder_name(entry.name)
+
             entries.append({
                 "folder":        entry.name,
-                "area":          meta["area"],
+                "area":          area,
                 "stacitemname":  meta["stacitemname"],
                 "line_id":       meta["line_id"],
                 "commentary":    meta["commentary"],
@@ -292,7 +331,9 @@ def gdwh_scan_bucket(env: str, gds_key: str) -> List[Dict]:
                 "year":          year,
                 "mtime":         mtime,
             })
-    except (OSError, PermissionError):
+    except (OSError, PermissionError) as e:
+        if log_fn:
+            log_fn(f"  [Bucket] Zugriffsfehler: {e}\n")
         return entries
     return sorted(
         entries,

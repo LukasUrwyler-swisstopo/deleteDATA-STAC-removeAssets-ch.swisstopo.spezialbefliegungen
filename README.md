@@ -1,32 +1,21 @@
-# STAC Asset-Deleting-Tool
+# STAC / GDWH Deleting-Tool
 
-GUI-Tool zum gezielten Löschen von Assets aus der STAC-Collection  
-**`ch.swisstopo.spezialbefliegungen`** (Kryosphäre / Rapidmapping).
+GUI-Tool zum gezielten Löschen von Daten aus:
 
-Die **Items selbst bleiben erhalten** — es werden ausschliesslich einzelne Asset-Einträge gelöscht.  
-Nach der Löschung kann ein korrektes Asset problemlos neu importiert werden.
+- **Tab 1 — STAC**: Assets (und bei Bedarf leere Items) aus der Collection `ch.swisstopo.spezialbefliegungen`
+- **Tab 2 — GDWH**: DataPackage-Imports aus dem Geodata-Warehouse (`ltgdwhi` / `ltgdwh`)
 
----
-
-## GUI
-
-<img width="1377" height="1405" alt="grafik" src="https://github.com/user-attachments/assets/5ec79c0a-7a49-4155-8c06-64eb5c79c589" />
-
+**Hintergrund:** Die Pipeline läuft GDWH → automatisierter STAC-Upload. Beim Re-Import müssen beide Systeme bereinigt werden.
 
 ---
 
 ## Voraussetzungen
 
-- Python 3.6+
+- Python 3.8+
 - Paket: `requests` (tkinter ist in der Standardbibliothek enthalten)
 
-```
-pip install requests
-```
-
-Installation prüfen:
 ```bash
-python -c "import requests; print(requests.__version__)"
+pip install requests
 ```
 
 ---
@@ -34,12 +23,16 @@ python -c "import requests; print(requests.__version__)"
 ## Ordnerstruktur
 
 ```
-deleteDATA-STAC-del_assets/
-├── 0_GUI_stac_delete_kry_assets.py   ← Hauptscript
+topo-deleteDATAfromSTAC/
+├── 0_GUI_stac_gdwh_delete_Data.py    ← Einstiegspunkt (GUI, 2 Tabs)
+├── stac_api.py                        ← STAC API-Funktionen (Modul)
+├── gdwh_api.py                        ← GDWH API-Funktionen (Modul)
+├── test_functions.py                  ← pytest-Tests (72 Tests)
 ├── secrets/
-│   ├── stac_credentials.json         ← STAC-Zugangsdaten (nicht in Git!)
-│   └── proxy_config.json             ← Proxy-Konfiguration (optional)
-├── .gitignore                        ← secrets/ ist ausgeschlossen
+│   ├── stac_credentials.json          ← STAC-Zugangsdaten (nicht in Git!)
+│   └── proxy_config.json              ← Proxy-Konfiguration (optional)
+├── logs/                              ← Tages-Logs (nicht in Git!)
+├── .gitignore
 └── README.md
 ```
 
@@ -58,17 +51,22 @@ deleteDATA-STAC-del_assets/
 }
 ```
 
+> `secrets/` ist über `.gitignore` vom Git-Tracking ausgeschlossen — Credentials nie committen.
+
 ---
 
 ## Starten
 
 ```bash
-python 0_GUI_stac_delete_kry_assets.py
+python 0_GUI_stac_gdwh_delete_Data.py
 ```
 
 ---
 
-## Bedienung
+## Tab 1 — STAC
+
+Löscht Assets aus `ch.swisstopo.spezialbefliegungen` via swisstopo Transactional API.  
+Wird ein Item durch die Löschung **vollständig leer** (alle Assets entfernt), wird das Item anschliessend automatisch mitgelöscht.
 
 ### Schritt 1 — Umgebung & Credentials
 
@@ -83,7 +81,6 @@ Erst danach werden die Suchbuttons aktiviert.
 ### Schritt 2 — Auftragstyp, Item & Asset-Filter
 
 #### Auftragstyp
-Wähle den Typ, um den Item-ID-Filter vorzubelegen:
 
 | Auftragstyp | Such-Vorschlag |
 |---|---|
@@ -91,26 +88,26 @@ Wähle den Typ, um den Item-ID-Filter vorzubelegen:
 | RAM (Rapidmapping) | `ram` |
 | Alle | *(leer)* |
 
-Der Wert im Item-ID-Feld ist jederzeit überschreibbar.
-
 #### Item-ID Suche
 
 | Button | Verhalten |
 |---|---|
-| **Exakt abrufen (1 Item)** | Direkter API-Call mit der vollständigen Item-ID — sofort, 1 Request |
-| **Alle suchen + filtern** | Lädt alle Items der Collection und filtert nach Teilstring — **langsam** bei 5000+ Items |
+| **Exakt abrufen (1 Item)** | Direkter API-Call mit vollständiger Item-ID — sofort, 1 Request |
+| **Alle suchen + filtern** | Lädt alle Items der Collection, filtert nach Teilstring — langsam bei 5000+ Items |
 
 > **Teilstring-Beispiele:** `2024-08-20`, `kry-2024`, `t10270000`
 
 #### Asset-Key Filter
+
 Filtert Assets nach einem Teilstring im Key, z.B. `nrgb`, `16bit`, `thumbnail`.  
 Leer lassen = alle Assets anzeigen.
 
 #### Dateiendungs-Filter
+
 Checkboxen für häufige Typen: `tif/tiff`, `copc.laz/laz`, `jpg/jpeg`, `png`, `json`.  
 Zusätzlich Freitext für weitere Endungen (z.B. `gpkg pdf`).
 
-> Filteränderungen wirken **sofort** auf die geladenen Daten — kein Neu-Abruf nötig.
+Filteränderungen wirken **sofort** auf die geladenen Daten — kein Neu-Abruf nötig.
 
 ---
 
@@ -138,18 +135,15 @@ Nach dem Laden erscheinen alle gefilterten Assets als Checkboxen:
 
 #### Asset-Prüfung (HEAD-Requests)
 
-Prüft die Erreichbarkeit der Dateien direkt auf dem Server (6 parallele Requests).  
-Der Status wird live neben dem Asset-Key angezeigt:
+Prüft die Erreichbarkeit der Dateien direkt auf dem Server (6 parallele Requests).
 
 | Anzeige | Bedeutung |
 |---|---|
 | `⟳` | Wird gerade geprüft |
 | `✓ 200` grün | Asset erreichbar und korrekt |
-| `✗ 400` rot | **Korrupt / Bad Request** → Kandidat zum Löschen |
+| `✗ 400` rot | Korrupt / Bad Request → Kandidat zum Löschen |
 | `✗ 404` rot | Datei nicht vorhanden |
 | `✗ timeout` orange | Netzwerk-Timeout |
-
-Nach der Prüfung wird `Fehlerhafte auswählen` aktiviert — ein Klick markiert automatisch alle fehlerhaften Assets.
 
 ---
 
@@ -167,9 +161,11 @@ Vor der Löschung erscheint ein **zweistufiger Sicherheitsdialog**:
 
 Das Log protokolliert jeden gelöschten Asset mit Status `[OK]` oder `[FAIL]`.
 
+**Item-Löschung:** Werden durch die Auswahl alle Assets eines Items entfernt, löscht das Tool das nun leere Item automatisch nach. Haben andere Assets im gleichen Item keine Checkbox gesetzt, bleibt das Item vollständig erhalten.
+
 ---
 
-## Typischer Workflow: Korrupte Assets bereinigen
+### Typischer Workflow STAC — Korrupte Assets bereinigen
 
 ```
 1.  Umgebung wählen (INT zum Testen, PROD für Live-Daten)
@@ -182,14 +178,92 @@ Das Log protokolliert jeden gelöschten Asset mit Status `[OK]` oder `[FAIL]`.
 6.  [Fehlerhafte auswählen]
 7.  [Asset Auswahl (n) löschen]  →  Sicherheitsdialog bestätigen
 8.  Korrektes Asset über den normalen Importprozess neu eintragen
-       → Item bleibt vollständig erhalten (Geometrie, Datum, alle anderen Assets)
 ```
+
+---
+
+## Tab 2 — GDWH
+
+Löscht DataPackage-Imports aus dem Geodata-Warehouse via GDWH-API v2.  
+Die Löschung ist **asynchron** — das GDWH startet einen Job und meldet den Abschluss optional per E-Mail.
+
+> **Erreichbarkeit:** Die GDWH-Hosts (`ltgdwhi.adr.admin.ch` / `ltgdwh.adr.admin.ch`) sind nur im internen Netz / VPN erreichbar.
+
+---
+
+### Schritt 1 — Umgebung & Credentials
+
+- **INT** = Integrationsumgebung (`ltgdwhi.adr.admin.ch`)
+- **PROD** = Produktionsumgebung (`ltgdwh.adr.admin.ch`)
+
+**GET-Abfragen** (Imports laden) benötigen **keine Credentials**.  
+**DELETE** benötigt **AD-Credentials (Windows-Login)** — Benutzername und Passwort direkt im GUI eingeben.  
+Die Zugangsdaten werden nicht gespeichert.
+
+---
+
+### Schritt 2 — GDS-Key eingeben & Imports laden
+
+GDS-Key eingeben (z.B. `SB_DSM`, `SB_DOP`) und `Imports laden` klicken.
+
+Die Liste zeigt alle vorhandenen DataPackages mit ID, Name, Datum und Status.
+
+---
+
+### Schritt 3 — Imports auswählen
+
+DataPackages via Checkbox markieren.
+
+| Button | Funktion |
+|---|---|
+| Alle auswählen | Alle sichtbaren Imports ankreuzen |
+| Alle abwählen | Alle abwählen |
+
+---
+
+### Schritt 4 — Löschung ausführen
+
+Optional: E-Mail-Adresse für Job-Abschluss-Benachrichtigung eingeben.
+
+Der Lösch-Button zeigt die aktuelle Auswahl:
+
+```
+Import Auswahl (2) löschen
+```
+
+Vor der Löschung erscheint ein **zweistufiger Sicherheitsdialog** analog zum STAC-Tab.
+
+Das Log protokolliert den gestarteten Lösch-Job pro Import mit Job-ID und initialem Status.
+
+---
+
+### Typischer Workflow GDWH — DataPackage entfernen
+
+```
+1.  Umgebung wählen (INT zum Testen, PROD für Live-Daten)
+2.  AD-Credentials (Windows-Login) eingeben
+3.  GDS-Key eingeben  →  [Imports laden]
+4.  Zu löschende DataPackages ankreuzen
+5.  Optional: E-Mail für Job-Benachrichtigung eingeben
+6.  [Import Auswahl (n) löschen]  →  Sicherheitsdialog bestätigen
+7.  Job-ID aus dem Log notieren — Abschluss folgt per E-Mail oder direkt im GDWH prüfen
+```
+
+---
+
+## Tests
+
+```bash
+pytest test_functions.py -v
+```
+
+72 Tests decken alle API-Funktionen in `stac_api.py` und `gdwh_api.py` ab (HTTP-Calls werden gemockt).
 
 ---
 
 ## Hinweise
 
-- **Items werden nie gelöscht** — nur einzelne Asset-Einträge werden entfernt.
-- Nach dem Löschen kann das Asset erneut importiert werden. Alle Metadaten des Items (Geometrie, Zeitstempel, Properties, übrige Assets) bleiben unverändert.
-- `secrets/` ist über `.gitignore` vom Git-Tracking ausgeschlossen — Credentials nie committen.
-- Für Einsatz hinter einem Proxy: `PROXY_AVAILABLE = True` setzen und `secrets/proxy_config.json` anpassen.
+- Für Einsatz hinter einem Proxy: `PROXY_AVAILABLE = True` in `stac_api.py` setzen und `secrets/proxy_config.json` anpassen.
+- `logs/` enthält Tages-Logs und ist nicht im Git-Tracking.
+- STAC-Endpunkte: swisstopo Transactional API (`DELETE /collections/{id}/items/{itemId}/assets/{assetKey}`, `DELETE /collections/{id}/items/{itemId}`)
+- GDWH-Endpunkte: GDWH-API v2 (`GET /api/geodatasets/{gdsKey}/data/imports`, `DELETE /api/geodatasets/{gdsKey}/data/imports/{datapackageId}`)

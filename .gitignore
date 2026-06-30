@@ -1,1 +1,5 @@
 secrets/
+__pycache__/
+.pytest_cache/
+.claude/
+logs/

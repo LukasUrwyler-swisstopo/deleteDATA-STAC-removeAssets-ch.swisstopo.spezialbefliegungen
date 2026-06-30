@@ -1,0 +1,89 @@
+"""
+gdwh_api.py  –  GDWH API Hilfsfunktionen
+
+Endpunkte:
+  GET    /api/geodatasets/{gdsKey}/data/imports           → DataPackages laden (kein Auth)
+  DELETE /api/geodatasets/{gdsKey}/data/imports/{id}      → DataPackage löschen (AD-Auth)
+
+Auth: AD-Credentials (Windows-Login) nur für DELETE erforderlich.
+Swagger (INT): https://ltgdwhi.adr.admin.ch/gdwh-api/v2/swagger/index.html
+"""
+
+import requests
+from typing import Dict, List, Tuple
+
+GDWH_ENVIRONMENTS = {
+    "INT":  "https://ltgdwhi.adr.admin.ch/gdwh-api/v2/",
+    "PROD": "https://ltgdwh.adr.admin.ch/gdwh-api/v2/",
+}
+
+
+def gdwh_get_imports(base_url: str, gds_key: str) -> List[Dict]:
+    """Holt alle DataPackages (Imports) für einen GDS-Key. Kein Auth erforderlich."""
+    url = f"{base_url}api/geodatasets/{gds_key}/data/imports"
+    r = requests.get(url, timeout=(30, 60))
+    r.raise_for_status()
+    data = r.json()
+    # Antwort kann direkt eine Liste oder ein Wrapper-Objekt mit Liste sein
+    if isinstance(data, list):
+        return data
+    for key in ("items", "imports", "datapackages", "results", "data"):
+        if key in data and isinstance(data[key], list):
+            return data[key]
+    return [data] if data else []
+
+
+def gdwh_delete_import(base_url: str, auth: Tuple, gds_key: str,
+                       datapackage_id: str, email: str = "") -> Dict:
+    """
+    Löscht alle Daten eines DataPackages permanent.
+    WARNUNG: unwiderruflich, keine Wiederherstellung möglich.
+    Gibt ein Job-Objekt zurück (Löschung läuft asynchron im GDWH).
+    """
+    url = f"{base_url}api/geodatasets/{gds_key}/data/imports/{datapackage_id}"
+    params = {"email": email} if email else None
+    r = requests.delete(url, auth=auth, params=params, timeout=(30, 120))
+    r.raise_for_status()
+    try:
+        return r.json()
+    except Exception:
+        return {"status": str(r.status_code)}
+
+
+def gdwh_import_id(imp: Dict) -> str:
+    """Extrahiert die DataPackage-ID aus einem Import-Objekt."""
+    for key in ("id", "datapackageId", "package_id", "importId"):
+        if imp.get(key):
+            return str(imp[key])
+    return "?"
+
+
+def gdwh_import_name(imp: Dict) -> str:
+    """Lesbarer Anzeigename für ein DataPackage."""
+    for key in ("name", "datapackageName", "package_name", "description", "label"):
+        if imp.get(key):
+            return str(imp[key])
+    return gdwh_import_id(imp)
+
+
+def gdwh_import_date(imp: Dict) -> str:
+    """Extrahiert und kürzt das Datum eines Imports."""
+    for key in ("date", "importDate", "created_at", "createdAt", "timestamp", "created"):
+        val = imp.get(key)
+        if val:
+            return str(val)[:16].replace("T", " ")
+    return "–"
+
+
+def gdwh_import_status(imp: Dict) -> str:
+    """Status eines Imports."""
+    for key in ("status", "state", "importStatus"):
+        if imp.get(key):
+            return str(imp[key])
+    return ""
+
+
+if __name__ == "__main__":
+    print("gdwh_api.py – GDWH API Modul")
+    print(f"  Umgebungen: {list(GDWH_ENVIRONMENTS.keys())}")
+    print(f"  Endpunkte:  GET imports, DELETE import")

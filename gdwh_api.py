@@ -20,8 +20,12 @@ from typing import Dict, List
 try:
     from requests_negotiate_sspi import HttpNegotiateAuth
 except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests-negotiate-sspi"],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _pkg = "requests-negotiate-sspi"
+    # Zuerst systemweit, bei Rechteproblem mit --user als Fallback
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", _pkg])
+    except subprocess.CalledProcessError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", _pkg])
     from requests_negotiate_sspi import HttpNegotiateAuth
 
 # Interne Firmen-CA nicht im Python-Truststore → Verifikation deaktivieren.

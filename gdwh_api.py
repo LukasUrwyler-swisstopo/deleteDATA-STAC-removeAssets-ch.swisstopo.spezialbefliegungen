@@ -11,10 +11,18 @@ Endpunkte:
 Swagger (INT): https://ltgdwhi.adr.admin.ch/gdwh-api/v2/swagger/index.html
 """
 
+import subprocess
+import sys
 import requests
 import urllib3
-from requests_negotiate_sspi import HttpNegotiateAuth
 from typing import Dict, List
+
+try:
+    from requests_negotiate_sspi import HttpNegotiateAuth
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests-negotiate-sspi"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    from requests_negotiate_sspi import HttpNegotiateAuth
 
 # Interne Firmen-CA nicht im Python-Truststore → Verifikation deaktivieren.
 # Alternativ: GDWH_SSL_VERIFY = r"C:\pfad\zur\firma-ca.pem"

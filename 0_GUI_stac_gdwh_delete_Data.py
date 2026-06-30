@@ -35,7 +35,9 @@ from stac_api import (
 from gdwh_api import (
     GDWH_ENVIRONMENTS, GDWH_GDS_KEYS,
     gdwh_get_imports, gdwh_delete_import,
-    gdwh_import_id, gdwh_import_name, gdwh_import_date, gdwh_import_status,
+    gdwh_import_id, gdwh_import_date, gdwh_import_status,
+    gdwh_import_footprint_bbox, gdwh_estimate_area,
+    gdwh_scan_bucket, gdwh_match_folder, gdwh_bucket_path,
 )
 
 # ─── Farbpaletten ─────────────────────────────────────────────────────────────
@@ -1428,11 +1430,26 @@ class KryDeleteApp(tk.Tk):
             imports = gdwh_get_imports(self._gdwh_base_url, gds_key)
             self._gdwh_imports = imports
             self._gdwh_log_write(f"[GDWH] {len(imports)} DataPackage(s) gefunden.\n")
-            # Debug: Rohstruktur des ersten Pakets anzeigen
-            if imports:
-                raw = json.dumps(imports[0], indent=2, ensure_ascii=False)
-                self._gdwh_log_write(f"[DEBUG] Struktur erstes DataPackage:\n{raw}\n\n")
-            self.after(0, lambda: self._gdwh_populate_list(imports))
+
+            # Bucket scannen und Imports mit XML-Metadaten anreichern
+            env = self._gdwh_env_var.get()
+            bucket = gdwh_bucket_path(env, gds_key)
+            self._gdwh_log_write(f"[GDWH] Scanne Bucket: {bucket} …\n")
+            bucket_entries = gdwh_scan_bucket(env, gds_key)
+            self._gdwh_log_write(
+                f"[GDWH] {len(bucket_entries)} Ordner im Bucket gefunden.\n")
+
+            # Jedem Import den passenden Ordner zuordnen
+            enriched = []
+            for imp in imports:
+                match = gdwh_match_folder(imp, bucket_entries)
+                enriched.append((imp, match))
+                if match:
+                    self._gdwh_log_write(
+                        f"  → {gdwh_import_date(imp)}  ↔  {match['folder']}"
+                        + (f"  [{match['area']}]" if match['area'] else "") + "\n")
+
+            self.after(0, lambda e=enriched: self._gdwh_populate_list(e))
         except Exception as exc:
             self._gdwh_log_write(f"[FEHLER] {exc}\n")
             self.after(0, lambda: messagebox.showerror("GDWH Fehler", str(exc)))
@@ -1445,11 +1462,11 @@ class KryDeleteApp(tk.Tk):
             w.destroy()
         self._gdwh_selection.clear()
 
-    def _gdwh_populate_list(self, imports: List[Dict]):
+    def _gdwh_populate_list(self, enriched: List[Tuple]):
         self._gdwh_clear_list()
         T = DARK if self._dark else LIGHT
 
-        if not imports:
+        if not enriched:
             tk.Label(
                 self._gdwh_list_frame,
                 text="Keine DataPackages gefunden.",
@@ -1460,18 +1477,19 @@ class KryDeleteApp(tk.Tk):
             self._gdwh_preview_lbl.configure(text="0 DataPackages gefunden.")
             return
 
-        for imp in imports:
+        for imp, match in enriched:
             pkg_id   = gdwh_import_id(imp)
-            pkg_name = gdwh_import_name(imp)
             pkg_date = gdwh_import_date(imp)
             pkg_stat = gdwh_import_status(imp)
+            pkg_bbox = gdwh_import_footprint_bbox(imp)
 
             var = tk.BooleanVar(value=False)
             var.trace_add("write", lambda *_: self._gdwh_on_checkbox_change())
             self._gdwh_selection[pkg_id] = var
 
+            # ── Hauptzeile ────────────────────────────────────────────────────
             row = tk.Frame(self._gdwh_list_frame, bg=T["chk_bg"])
-            row.pack(fill="x", padx=6, pady=2)
+            row.pack(fill="x", padx=6, pady=(3, 0))
 
             tk.Checkbutton(
                 row, variable=var,
@@ -1479,44 +1497,89 @@ class KryDeleteApp(tk.Tk):
                 activebackground=T["chk_bg"], activeforeground=T["fg"],
             ).pack(side="left")
 
-            # Name / ID
-            name_lbl = tk.Label(
-                row, text=pkg_name,
-                font=("Cascadia Mono", 9, "bold"),
-                bg=T["chk_bg"], fg=T["fg"], anchor="w",
-            )
-            name_lbl._is_pkg_header = True
-            name_lbl.pack(side="left")
+            # ── Felder aus Bucket-Match ───────────────────────────────────────
+            auftragstyp   = match.get("auftragstyp", "")   if match else ""
+            area          = match.get("area", "")           if match else ""
+            stac_datetime = match.get("stac_datetime", "")  if match else ""
+            commentary    = match.get("commentary", "")     if match else ""
+            year          = match.get("year", "")           if match else ""
+            folder        = match.get("folder", "")         if match else ""
 
-            # Datum
-            if pkg_date != "–":
+            has_match = bool(match and (area or auftragstyp or folder))
+
+            # ── Zeile 1: Auftragstyp  |  AREA  |  Jahr  |  Paketname  ────────
+            if auftragstyp:
                 tk.Label(
-                    row, text=f"    {pkg_date}",
+                    row, text=auftragstyp,
+                    font=("Cascadia Mono", 9, "bold"),
+                    bg=T["chk_bg"], fg=T["ok"], anchor="w",
+                ).pack(side="left")
+
+            if area:
+                lbl = tk.Label(
+                    row, text=f"    {area}" if auftragstyp else area,
+                    font=("Cascadia Mono", 9, "bold"),
+                    bg=T["chk_bg"], fg=T["accent"], anchor="w",
+                )
+                lbl._is_pkg_header = True
+                lbl.pack(side="left")
+            elif not has_match:
+                # Kein Match: geschätzte AREA aus Koordinaten
+                estimated = gdwh_estimate_area(imp)
+                lbl = tk.Label(
+                    row, text=estimated if estimated else pkg_id[:8] + "…",
+                    font=("Cascadia Mono", 9, "bold"),
+                    bg=T["chk_bg"], fg=T["hint"], anchor="w",
+                )
+                lbl._is_pkg_header = True
+                lbl.pack(side="left")
+
+            if year:
+                tk.Label(
+                    row, text=f"    {year}",
                     font=("Cascadia Mono", 9),
                     bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
                 ).pack(side="left")
 
-            # Status
+            if folder:
+                tk.Label(
+                    row, text=f"    {folder}",
+                    font=("Cascadia Mono", 9),
+                    bg=T["chk_bg"], fg=T["fg"], anchor="w",
+                ).pack(side="left")
+
             if pkg_stat:
-                status_color = "ok" if pkg_stat.lower() in (
+                sc = "ok" if pkg_stat.lower() in (
                     "completed", "done", "success", "finished") else "hint"
                 tk.Label(
                     row, text=f"    [{pkg_stat}]",
                     font=("Cascadia Mono", 9),
-                    bg=T["chk_bg"],
-                    fg=T[status_color], anchor="w",
+                    bg=T["chk_bg"], fg=T[sc], anchor="w",
                 ).pack(side="left")
 
-            # ID (gedimmt, falls Name bereits vorhanden)
-            if pkg_name != pkg_id:
-                tk.Label(
-                    row, text=f"    ID: {pkg_id}",
-                    font=("Cascadia Mono", 8),
-                    bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
-                ).pack(side="left")
+            # ── Zeile 2: StacItemIdDatetime  |  Commentary  |  Import-Datum  ─
+            detail_row = tk.Frame(self._gdwh_list_frame, bg=T["chk_bg"])
+            detail_row.pack(fill="x", padx=28, pady=(0, 3))
+
+            detail_parts = []
+            if stac_datetime:
+                detail_parts.append(stac_datetime)
+            if commentary:
+                detail_parts.append(commentary)
+            if not has_match:
+                if pkg_bbox:
+                    detail_parts.append(pkg_bbox)
+            detail_parts.append(pkg_date)
+
+            tk.Label(
+                detail_row,
+                text="  " + "   ·   ".join(detail_parts),
+                font=("Segoe UI", 8),
+                bg=T["chk_bg"], fg=T["fg_dim"], anchor="w",
+            ).pack(side="left")
 
         self._gdwh_fetch_btn.config(state="normal")
-        st = "normal" if imports else "disabled"
+        st = "normal" if enriched else "disabled"
         self._gdwh_sel_all_btn.config(state=st)
         self._gdwh_sel_none_btn.config(state=st)
         self._gdwh_on_checkbox_change()

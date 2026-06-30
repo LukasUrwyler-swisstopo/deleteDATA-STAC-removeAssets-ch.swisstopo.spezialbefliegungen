@@ -13,11 +13,14 @@ Swagger (INT): https://ltgdwhi.adr.admin.ch/gdwh-api/v2/swagger/index.html
 
 import json
 import os
+import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 import requests
 import urllib3
-from typing import Dict, List
 
 
 _FALLBACK_PROXY = "http://proxy-bvcol.admin.ch:8080"
@@ -120,8 +123,8 @@ def gdwh_delete_import(base_url: str, gds_key: str,
 
 
 def gdwh_import_id(imp: Dict) -> str:
-    """Extrahiert die DataPackage-ID aus einem Import-Objekt."""
-    for key in ("id", "datapackageId", "package_id", "importId"):
+    """Extrahiert die DataPackage-ID (UUID) aus einem Import-Objekt."""
+    for key in ("uuid", "id", "datapackageId", "package_id", "importId"):
         if imp.get(key):
             return str(imp[key])
     return "?"
@@ -132,12 +135,14 @@ def gdwh_import_name(imp: Dict) -> str:
     for key in ("name", "datapackageName", "package_name", "description", "label"):
         if imp.get(key):
             return str(imp[key])
-    return gdwh_import_id(imp)
+    # Kein Namensfeld vorhanden: UUID gekürzt anzeigen
+    uid = gdwh_import_id(imp)
+    return uid[:8] + "…" if len(uid) > 8 else uid
 
 
 def gdwh_import_date(imp: Dict) -> str:
     """Extrahiert und kürzt das Datum eines Imports."""
-    for key in ("date", "importDate", "created_at", "createdAt", "timestamp", "created"):
+    for key in ("importDate", "date", "created_at", "createdAt", "timestamp", "created"):
         val = imp.get(key)
         if val:
             return str(val)[:16].replace("T", " ")
@@ -150,6 +155,252 @@ def gdwh_import_status(imp: Dict) -> str:
         if imp.get(key):
             return str(imp[key])
     return ""
+
+
+# ─── Bucket-Scan & XML-Parsing ───────────────────────────────────────────────
+
+_BUCKET_BASE = r"\\v0t0020a.adr.admin.ch\iprod\gdwh-ingest"
+
+_GDS_BUCKET_TYPE = {
+    "SB_DOP":             "RASTER",
+    "SB_DOP_16":          "RASTER",
+    "SB_DSM":             "RASTER",
+    "SB_DSM_PUNKTWOLKE":  "VECTOR",
+}
+
+# XML-Feldnamen für Metadaten-Extraktion
+_XML_AREA_TAGS        = ("AREA",)
+_XML_ITEMNAME_TAGS    = ("stacitemname", "stac_item_name", "stacItemName", "ItemName")
+_XML_LINEID_TAGS      = ("Line_ID", "LineID", "line_id")
+_XML_COMMENTARY_TAGS  = ("Commentary", "Kommentar", "Comment", "Description")
+_XML_AUFTRAGSTYP_TAGS = ("Auftragstyp", "AuftragsTyp", "auftragstyp", "OrderType", "Type")
+_XML_DATETIME_TAGS    = ("StacItemIdDatetime", "StacItemIdDateTime",
+                         "stac_item_id_datetime", "StacDateTime", "AcquisitionDate")
+
+
+def gdwh_bucket_path(env: str, gds_key: str) -> str:
+    """Gibt den UNC-Pfad zum GDWH-Bucket-Ordner zurück."""
+    bucket = "BUCKET_INT" if env == "INT" else "BUCKET"
+    btype  = _GDS_BUCKET_TYPE.get(gds_key, "RASTER")
+    return os.path.join(_BUCKET_BASE, bucket, btype, gds_key)
+
+
+def _parse_iso_dt(s: str) -> Optional[datetime]:
+    """ISO-8601-Datum parsen, Python-3.6-kompatibel."""
+    s = s.strip().rstrip("Z")
+    s = re.sub(r"(\.\d{6})\d*", r"\1", s)   # Mikrosekunden auf 6 Stellen kürzen
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _find_xml_value(root: ET.Element, tags) -> str:
+    """Sucht rekursiv nach dem ersten vorhandenen Tag und gibt dessen Text zurück."""
+    for tag in tags:
+        el = root.find(".//" + tag)
+        if el is not None and el.text and el.text.strip():
+            return el.text.strip()
+    return ""
+
+
+def _lv95(val: float) -> str:
+    """LV95-Koordinate im Schweizer Format (Apostroph als Tausendertrennzeichen)."""
+    return f"{int(val):,}".replace(",", "'")
+
+
+def _extract_year_from_folder(folder_name: str) -> str:
+    """Extrahiert das Jahr aus dem Ordnernamen, z.B. '2023_OBERAAR_DSM' → '2023'."""
+    m = re.match(r"(\d{4})[_\-]", folder_name)
+    return m.group(1) if m else ""
+
+
+def _read_folder_xml(folder_path: str) -> Dict:
+    """Liest die erste XML-Datei im Ordner (max. 1 Ebene tief) und extrahiert Metadaten."""
+    result = {
+        "area": "", "stacitemname": "", "line_id": "", "commentary": "",
+        "auftragstyp": "", "stac_datetime": "",
+    }
+    candidates = []
+    try:
+        for entry in os.scandir(folder_path):
+            if entry.is_file() and entry.name.lower().endswith(".xml"):
+                candidates.append(entry.path)
+            elif entry.is_dir():
+                try:
+                    for sub in os.scandir(entry.path):
+                        if sub.is_file() and sub.name.lower().endswith(".xml"):
+                            candidates.append(sub.path)
+                except OSError:
+                    pass
+    except OSError:
+        return result
+    for xml_path in candidates:
+        try:
+            root = ET.parse(xml_path).getroot()
+            result["area"]          = _find_xml_value(root, _XML_AREA_TAGS)
+            result["stacitemname"]  = _find_xml_value(root, _XML_ITEMNAME_TAGS)
+            result["line_id"]       = _find_xml_value(root, _XML_LINEID_TAGS)
+            result["commentary"]    = _find_xml_value(root, _XML_COMMENTARY_TAGS)
+            result["auftragstyp"]   = _find_xml_value(root, _XML_AUFTRAGSTYP_TAGS)
+            result["stac_datetime"] = _find_xml_value(root, _XML_DATETIME_TAGS)
+            if any(result.values()):
+                break
+        except Exception:
+            continue
+    return result
+
+
+def gdwh_scan_bucket(env: str, gds_key: str) -> List[Dict]:
+    """
+    Scannt den GDWH-Bucket-Ordner und liefert für jeden Datenpaket-Unterordner
+    die XML-Metadaten und den Änderungszeitpunkt zurück.
+
+    Returns:
+        Liste von Dicts: folder, area, stacitemname, line_id, commentary, mtime (datetime UTC)
+    """
+    root_path = gdwh_bucket_path(env, gds_key)
+    entries = []
+    if not os.path.exists(root_path):
+        return entries
+    try:
+        for entry in os.scandir(root_path):
+            if not entry.is_dir():
+                continue
+            mtime = None
+            try:
+                mtime = datetime.fromtimestamp(
+                    entry.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                pass
+            meta = _read_folder_xml(entry.path)
+            # Jahr: zuerst aus Ordnername, Fallback aus StacItemIdDatetime
+            year = _extract_year_from_folder(entry.name)
+            if not year and meta["stac_datetime"]:
+                m = re.search(r"(\d{4})", meta["stac_datetime"])
+                year = m.group(1) if m else ""
+            entries.append({
+                "folder":        entry.name,
+                "area":          meta["area"],
+                "stacitemname":  meta["stacitemname"],
+                "line_id":       meta["line_id"],
+                "commentary":    meta["commentary"],
+                "auftragstyp":   meta["auftragstyp"],
+                "stac_datetime": meta["stac_datetime"],
+                "year":          year,
+                "mtime":         mtime,
+            })
+    except (OSError, PermissionError):
+        return entries
+    return sorted(
+        entries,
+        key=lambda x: x["mtime"] or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+
+def gdwh_match_folder(imp: Dict, bucket_entries: List[Dict],
+                       max_diff_hours: float = 12.0) -> Optional[Dict]:
+    """
+    Ordnet einem GDWH-Import den zeitlich nächstliegenden Bucket-Ordner zu.
+    Gibt None zurück wenn der beste Match mehr als max_diff_hours entfernt liegt.
+    """
+    import_dt = _parse_iso_dt(imp.get("importDate", ""))
+    if import_dt is None or not bucket_entries:
+        return None
+    best, best_secs = None, float("inf")
+    for entry in bucket_entries:
+        if entry["mtime"] is None:
+            continue
+        diff = abs((import_dt - entry["mtime"]).total_seconds())
+        if diff < best_secs:
+            best_secs = diff
+            best = entry
+    return best if best_secs <= max_diff_hours * 3600 else None
+
+
+# ─── AOI-Schätztabelle (Zentroide in LV95, EPSG:2056) ────────────────────────
+# Approximate centroids for known Spezialbefliegungen AOIs.
+# Ergänzen wenn neue AOIs hinzukommen.
+_AOI_CENTROIDS: Dict[str, tuple] = {
+    "A_NEUVE":                  (2567500, 1085500),
+    "AERLENGLETSCHER":          (2651000, 1175000),
+    "ALETSCH_MOOSFLUE":         (2644000, 1140000),
+    "BIS_HOHLICHT_TURTMANN":    (2614000, 1115000),
+    "CENGALO":                  (2771000, 1122000),
+    "CORVATSCH":                (2776000, 1146000),
+    "DIABLONS":                 (2611000, 1111000),
+    "FEE_OST":                  (2636000, 1105000),
+    "FINDEL":                   (2619000, 1098000),
+    "FINSTERAAR":               (2647000, 1158000),
+    "GORNER":                   (2621000, 1094000),
+    "GRAECHEN":                 (2634000, 1111000),
+    "GRIES":                    (2666000, 1140000),
+    "GROSSER_ALETSCH_SUED":     (2638000, 1135000),
+    "GRUEEBU_SAAS":             (2637000, 1107000),
+    "HOHBERG":                  (2683000, 1168000),
+    "JEGIHORN":                 (2632000, 1106000),
+    "LAUTERAAR":                (2656000, 1164000),
+    "LONA":                     (2613000, 1127000),
+    "MONT_ETOILE":              (2609000, 1125000),
+    "MONTE_PROSA":              (2686000, 1154000),
+    "OBERAAR":                  (2657000, 1160000),
+    "OBERER_GRINDELWALD":       (2654000, 1172000),
+    "PERROC":                   (2598000, 1105000),
+    "PINCABELLA_&_LARGARIO":    (2715000, 1118000),
+    "PLAINE_MORTE":             (2611000, 1139000),
+    "RANDA":                    (2626000, 1105000),
+    "RHONE":                    (2671000, 1155000),
+    "RIENZENSTOCK":             (2713000, 1198000),
+    "SCHAFBERG_MURAGL":         (2787000, 1154000),
+    "SILVRETTA":                (2791000, 1191000),
+    "SUVRETTA":                 (2779000, 1155000),
+    "TRIFT":                    (2665000, 1177000),
+    "UNTERAAR":                 (2653000, 1162000),
+    "UNTERER_GRINDELWALD":      (2648000, 1170000),
+    "WEISSMIES":                (2641000, 1111000),
+}
+
+
+def gdwh_estimate_area(imp: Dict) -> str:
+    """Schätzt die AREA anhand des Footprint-Zentroiden (nächster AOI in LV95).
+    Gibt einen String der Form 'OBERAAR (geschätzt)' zurück, oder '' wenn kein Footprint."""
+    wkt = imp.get("footprint", "")
+    if not wkt:
+        return ""
+    try:
+        coords = re.findall(r"([\d.]+)\s+([\d.]+)", wkt)
+        if not coords:
+            return ""
+        cx = sum(float(x) for x, _ in coords) / len(coords)
+        cy = sum(float(y) for _, y in coords) / len(coords)
+        best_name, best_dist = "", float("inf")
+        for name, (ax, ay) in _AOI_CENTROIDS.items():
+            dist = (cx - ax) ** 2 + (cy - ay) ** 2
+            if dist < best_dist:
+                best_dist = dist
+                best_name = name
+        return f"{best_name} (geschätzt)" if best_name else ""
+    except Exception:
+        return ""
+
+
+def gdwh_import_footprint_bbox(imp: Dict) -> str:
+    """Zentroid des Footprints in LV95 CH1903+ (EPSG:2056), Schweizer Notation."""
+    wkt = imp.get("footprint", "")
+    if not wkt:
+        return ""
+    try:
+        coords = re.findall(r"([\d.]+)\s+([\d.]+)", wkt)
+        if not coords:
+            return ""
+        cx = sum(float(x) for x, _ in coords) / len(coords)
+        cy = sum(float(y) for _, y in coords) / len(coords)
+        return f"LV95  E {_lv95(cx)} / N {_lv95(cy)}"
+    except Exception:
+        return ""
 
 
 if __name__ == "__main__":

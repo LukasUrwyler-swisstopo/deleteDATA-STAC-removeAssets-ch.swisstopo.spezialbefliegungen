@@ -206,9 +206,50 @@ Authentifizierung läuft automatisch über die **Windows-Session** (SSPI) — ke
 
 ### Schritt 2 — GDS-Key eingeben & Imports laden
 
-GDS-Key eingeben (z.B. `SB_DSM`, `SB_DOP`) und `Imports laden` klicken.
+GDS-Key eingeben (z.B. `SB_DSM`, `SB_DOP`, `SB_DSM_PUNKTWOLKE`) und `Imports laden` klicken.
 
-Die Liste zeigt alle vorhandenen DataPackages mit ID, Name, Datum und Status.
+Das Tool lädt alle DataPackages per API und reichert sie danach automatisch mit Metadaten an:
+
+#### Datenanreicherung via Bucket-Scan
+
+Das Tool durchsucht den Netzwerk-Bucket des jeweiligen GDS-Key nach dem passenden DataPackage-Ordner:
+
+```
+\\v0t0020a.adr.admin.ch\iprod\gdwh-ingest\
+  BUCKET_INT\          (INT-Umgebung)
+    RASTER\SB_DOP\     ← z.B. für SB_DOP
+    RASTER\SB_DSM\
+    VECTOR\SB_DSM_PUNKTWOLKE\
+      2023_OBERAAR_DSM\
+        *.xml          ← XML-Metadaten werden hier gelesen
+```
+
+Die Zuordnung erfolgt via Importdatum vs. Ordner-Änderungsdatum (±12 Stunden).  
+Aus den XML-Dateien werden folgende Felder extrahiert:
+
+| Feld | XML-Tag | Bedeutung |
+|---|---|---|
+| Auftragstyp | `<Auftragstyp>` | `KRY` oder `RAM` |
+| AREA | `<AREA>` | AOI-Name (z.B. `OBERAAR`) |
+| StacItemIdDatetime | `<stacitemname>` / `<StacItemIdDatetime>` | STAC-Item-ID / Aufnahmedatum |
+| Commentary | `<Commentary>` | Freitext-Bemerkung |
+| Jahr | Ordnername (z.B. `2023_OBERAAR_DSM`) oder `<StacItemIdDatetime>` | Aufnahmejahr |
+
+#### Anzeige mit Bucket-Match
+
+```
+☐  [KRY]  OBERAAR  2023  2023_OBERAAR_DSM
+     ch.swisstopo.spezialbefliegungen_kry_2023-08-15  ·  Erstbefliegung  ·  2023-08-20 14:39
+```
+
+#### Anzeige ohne Bucket-Match (Fallback)
+
+Wenn kein passender Ordner gefunden wird, schätzt das Tool das AOI aus dem Footprint-Zentroid (LV95) und zeigt die Koordinaten:
+
+```
+☐  OBERAAR (geschätzt)
+     LV95  E 2'657'636 / N 1'153'620  ·  2023-08-20 14:39
+```
 
 ---
 
@@ -243,12 +284,12 @@ Das Log protokolliert den gestarteten Lösch-Job pro Import mit Job-ID und initi
 
 ```
 1.  Umgebung wählen (INT zum Testen, PROD für Live-Daten)
-2.  AD-Credentials (Windows-Login) eingeben
-3.  GDS-Key eingeben  →  [Imports laden]
-4.  Zu löschende DataPackages ankreuzen
-5.  Optional: E-Mail für Job-Benachrichtigung eingeben
-6.  [Import Auswahl (n) löschen]  →  Sicherheitsdialog bestätigen
-7.  Job-ID aus dem Log notieren — Abschluss folgt per E-Mail oder direkt im GDWH prüfen
+2.  GDS-Key eingeben  →  [Imports laden]
+       → Liste wird mit Auftragstyp, AREA, Jahr und Commentary angereichert
+3.  Zu löschende DataPackages ankreuzen
+4.  Optional: E-Mail für Job-Benachrichtigung eingeben
+5.  [Import Auswahl (n) löschen]  →  Sicherheitsdialog bestätigen
+6.  Job-ID aus dem Log notieren — Abschluss folgt per E-Mail oder direkt im GDWH prüfen
 ```
 
 ---
@@ -259,13 +300,14 @@ Das Log protokolliert den gestarteten Lösch-Job pro Import mit Job-ID und initi
 pytest test_functions.py -v
 ```
 
-72 Tests decken alle API-Funktionen in `stac_api.py` und `gdwh_api.py` ab (HTTP-Calls werden gemockt).
+~100 Tests decken alle API-Funktionen in `stac_api.py` und `gdwh_api.py` ab (HTTP-Calls werden gemockt), inkl. der neuen Funktionen `gdwh_estimate_area`, `gdwh_import_footprint_bbox` und `gdwh_bucket_path`.
 
 ---
 
 ## Hinweise
 
-- Für Einsatz hinter einem Proxy: `PROXY_AVAILABLE = True` in `stac_api.py` setzen und `secrets/proxy_config.json` anpassen.
+- Der BVCOL-Firmenproxy (`proxy-bvcol.admin.ch:8080`) ist in `stac_api.py` und `gdwh_api.py` hinterlegt. Für abweichende Proxy-Konfigurationen: `secrets/proxy_config.json` anlegen (Vorlage: `secrets/proxy_config_template.json`).
 - `logs/` enthält Tages-Logs und ist nicht im Git-Tracking.
 - STAC-Endpunkte: swisstopo Transactional API (`DELETE /collections/{id}/items/{itemId}/assets/{assetKey}`, `DELETE /collections/{id}/items/{itemId}`)
 - GDWH-Endpunkte: GDWH-API v2 (`GET /api/geodatasets/{gdsKey}/data/imports`, `DELETE /api/geodatasets/{gdsKey}/data/imports/{datapackageId}`)
+- Koordinaten im LV95-Format (CH1903+, EPSG:2056) mit Schweizer Apostroph als Tausendertrennzeichen

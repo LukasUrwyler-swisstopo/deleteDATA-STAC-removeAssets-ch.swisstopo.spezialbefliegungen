@@ -76,20 +76,14 @@ GDWH_SSL_VERIFY: bool = False
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-_GDWH_PROXY = {
-    "http":  "http://proxy-bvcol.admin.ch:8080",
-    "https": "http://proxy-bvcol.admin.ch:8080",
-}
-
-
 def _gdwh_session() -> requests.Session:
-    """Session mit frischer SSPI-Auth und explizitem Firmen-Proxy.
-    Frische HttpNegotiateAuth-Instanz verhindert State-Carryover zwischen INT und PROD.
-    requests.Session() hält die TCP-Verbindung für den mehrstufigen SSPI-Handshake."""
+    """Session mit frischer SSPI-Auth, direkte Verbindung ohne Proxy.
+    GDWH ist ein internes System (ltgdwhi/ltgdwh.adr.admin.ch) – kein Internet-Proxy.
+    requests.Session() hält die TCP-Verbindung für den mehrstufigen SSPI-Handshake aufrecht."""
     s = requests.Session()
     s.auth    = HttpNegotiateAuth()
     s.verify  = GDWH_SSL_VERIFY
-    s.proxies = _GDWH_PROXY
+    s.proxies = {"http": "", "https": ""}
     return s
 
 GDWH_GDS_KEYS = [
